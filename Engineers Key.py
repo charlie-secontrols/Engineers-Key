@@ -1,13 +1,15 @@
-### main.py
 import utime
 import time
-from machine import mem32,Pin
+from machine import mem32, Pin
 from i2cSlave import i2c_slave
 import bluetooth
 from ble_simple_peripheral import BLESimplePeripheral
 
+led = Pin("LED", Pin.OUT)
+led.off()
+
 ### --- pico connect i2c as slave --- ###
-s_i2c = i2c_slave(0,sda=0,scl=1,slaveAddress=0x4f)
+s_i2c = i2c_slave(0, sda=0, scl=1, slaveAddress=0x4f)
 
 # Create a Bluetooth Low Energy (BLE) object
 ble = bluetooth.BLE()
@@ -15,7 +17,8 @@ ble = bluetooth.BLE()
 sp = BLESimplePeripheral(ble)
 
 def on_rx(data):
-    print("OSLink Command: ", data)  # Print the received data
+    print("OSLink Command: ", int(data))  # Print the received data
+    s_i2c.send_to_master(int(data))
 
 try:
     while True:
@@ -23,7 +26,7 @@ try:
         print(data)
 
         data_int = int(data)
-        
+
         if sp.is_connected():
             # Create a message string
             sp.on_write(on_rx)
