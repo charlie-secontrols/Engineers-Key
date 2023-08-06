@@ -16,9 +16,8 @@ class i2c_slave:
     readcount = 0
     addrNext = False
     addr = 0
-    writecount = 0
+    ptr = 0
     slot0 = bytearray(128)
-    transfer_in_progress = False
 
     mem_rw = const(0x0000)
     mem_xor = 0x1000
@@ -46,7 +45,7 @@ class i2c_slave:
 
     # New register definition for transmitting data
     IC_CLR_TX_DONE = 0x58
-    IC_CLR_ACTIVITY = 0x5C
+    IC_CLR_TX_ABRT = 0x5C
 
     def write_reg(self, reg, data, method=0):
         mem32[self.i2c_base | method | reg] = data
@@ -66,8 +65,6 @@ class i2c_slave:
             self.i2c_base = self.I2C0_BASE
         else:
             self.i2c_base = self.I2C1_BASE
-            
-        self.write_reg(self.IC_TX_TL, 4);
 
         # set SDA PIN
         mem32[self.IO_BANK0_BASE | self.mem_clr | (4 + 8 * self.sda)] = 0x1f
@@ -98,12 +95,14 @@ class i2c_slave:
         
         #mask all interrupts
         mem32[self.i2c_base | 0x30 ] = 0
+        
 
         # 4 enable i2c
         self.set_reg(self.IC_ENABLE, 1)
 
     def ABRT_SOURCE(self) :
         return mem32[self.i2c_base | 0x80]
+    
 
     def RX_FULL(self):
         return bool(mem32[self.i2c_base | self.IC_RAW_INTR_STAT] & 0x4)
@@ -124,6 +123,25 @@ class i2c_slave:
     def TFE(self):
         return bool(mem32[self.i2c_base | self.IC_STATUS] & 4)
 
+
+    def put(self, data):
+        # Wait until the transmit FIFO is not full
+        #while mem32[self.i2c_base | self.IC_STATUS] & 0x10:
+        #    pass
+        if self.TX_ABRT() :
+            
+            print("!", end='')
+            self.CLR_TX_ABRT();
+            
+        sent = 0
+        while self.TFNF() and (sent < 4) :
+            print(">", end='')
+            mem32[self.i2c_base | self.IC_DATA_CMD] = data & 0xFF
+            sent = sent + 1
+        self.CLR_RD_REQ()
+        print("|")
+        
+        
     def CLR_TX_ABRT(self) :
         clr = mem32[self.i2c_base | self.IC_CLR_TX_ABRT]
         
@@ -169,16 +187,11 @@ class i2c_slave:
             self.CLR_RX_OVER()
 
         if i & (1<<6) : #ABORT LAST TRANSACTION
-            #Abort code 0x2000 is expected if the Tx_fifo was pushed with more data than is read
-            abrt = self.ABRT_SOURCE()
+            print("ABRT = " + hex(i2c.ABRT_SOURCE()))
             self.CLR_TX_ABRT()
-            if (abrt & 0xFFFF) != 0x2000 :
-                print("ABRT = " + hex(self.ABRT_SOURCE()) + " i="+hex(i))
-                done = True
-            else :
-                print("a="+hex(i))
-    
-        if i & (1<<12) :  #RESTART, NEVER SEEN
+            done = True
+
+        if(i & (1<<12)):  #RESTART, NEVER SEEN
 #            print("R", end='')
             self.CLR_RESTART_DET()
             done = True
@@ -186,45 +199,42 @@ class i2c_slave:
         if(i & (1<<10)):	#START_DET
 #                print("S", end='')
             self.CLR_START_DET()
-#            done = True
+            done = True
             
         
         if(i & (1<<9)):
-#           print("P", end='')
+           print("P", end='')
            self.CLR_STOP_DET()
            done = True
 
         if(i & (1<<7)):
             i2c.CLR_RX_DONE()
+            print("Addr="+hex(addr)+" WR:"+hex(ptr)+" RD:"+hex(readcount))
             done = True
         
-        if done and self.transfer_in_progress :
-            self.transfer_in_progress = False;
-            if self.writecount > 0 or self.readcount > 0 :
-                print("Addr="+hex(self.addr)+" WR:"+hex(self.writecount)+" RD:"+hex(self.readcount)+":"+str(self.txc))
-            else :
-                print("exit i="+hex(i));
-            return self.writecount > 0 or self.readcount > 0
+        if done && transfer_in_progress :
+            transfer_in_progress = False;
+            return True
         
             
         if (i & 0x04) : #i2c.RX_FULL():
-            self.transfer_in_progress = True
+            transfer_in_progress = True
             rx = mem32[self.i2c_base | self.IC_DATA_CMD]
             firstByte = (rx & 2048) != 0
             rx = rx & 0xFF
             if firstByte :
 #                    print("F", end='')
-                self.txc = 0
-                self.addr= rx & 0xFF
-                self.addrNext = True
-                self.readcount = 0
-                self.writecount = 0;
-            elif self.addrNext :
-                self.addr = (self.addr << 8) | rx
-                self.addrNext = False
-            elif self.writecount < 128 :
-                self.slot0[self.writecount] = rx 
-                writecount += 1
+                txc = 0
+                addr= rx & 0xFF
+                addrNext = True
+                readcount = 0
+                ptr = 0;
+            elif addrNext :
+                addr = (addr<<8) | (rx & 0xFF)
+                addrNext = False
+            elif ptr < 128 :
+                slot0[ptr] = (rx & 0xFF)
+                ptr = ptr + 1
             else :
                 print("overflow")
                 
@@ -232,22 +242,17 @@ class i2c_slave:
             #print("<"+hex(rx & 0xFF),end='')
             i2c.CLR_RX_FULL()
 
-        elif (i & 0x20) : #i2c.RD_REQ():
+        if (i & 0x20) : #i2c.RD_REQ():
        
-            self.transfer_in_progress = True
-            self.CLR_RD_REQ()
-            if self.TFNF() :
-                mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc
-                self.txc += 1
-            if self.TFNF() :
-                mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc
-                self.txc += 1
-            if self.TFNF() :
-                mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc
-                self.txc += 1
-#            mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc | 0xC0
-            self.readcount += 1
+            txc = txc + 1
+            transfer_in_progress = True
+            if self.TX_ABRT() :
+                print("ABRT = " + hex(self.ABRT_SOURCE())+"@q")
+                self.CLR_TX_ABRT()
+            mem32[i2c.i2c_base | i2c.IC_DATA_CMD] = txc
+            readcount += 1
             # print("Q", end='')
+            self.CLR_RD_REQ()
 
         return False
                 
@@ -257,9 +262,9 @@ class i2c_slave:
     
     
 
-#import utime
+#if __name__ == "__main__":
+import utime
 #from machine import mem32
-    
 i2c = i2c_slave(0, sda = 0, scl = 1, slaveAddress = 0x52)
 def reg():
     print("     CON = " + hex(mem32[i2c.i2c_base | i2c.IC_CON] ))
@@ -274,6 +279,13 @@ def reg():
         print("ABRT = " + hex(i2c.ABRT_SOURCE()))
 #    print("GPIO_SDA = "+hex(mem32[i2c.IO_BANK0_BASE | (4 + 8 * i2c.sda)] ))
 #    print("GPIO_SCL = "+hex(mem32[i2c.IO_BANK0_BASE | (4 + 8 * i2c.scl)] ))
+
+def clri():
+    print("INT CLR  = "+hex(mem32[i2c.i2c_base | 0x40 ] ))
+
+def rd():
+    if i2c.RD_REQ():
+        print("INT RD  = "+hex(mem32[i2c.i2c_base | 0x50 ] ))
 
 def en():
     i2c.set_reg(i2c.IC_ENABLE, 1)
@@ -306,8 +318,7 @@ def go():
         while True :
             #if i != mem32[i2c.i2c_base | i2c.IC_RAW_INTR_STAT]:
             if i2c.service() :
-                print(counter)
-                counter += 1
+                print("done")
             
     except KeyboardInterrupt:
         pass
