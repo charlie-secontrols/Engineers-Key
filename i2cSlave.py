@@ -18,7 +18,7 @@ class i2c_slave:
     addr = 0
     writecount = 0
     slot0 = bytearray(128)
-    transfer_in_progress = False
+    transfer_in_progress = 0
 
     mem_rw = const(0x0000)
     mem_xor = 0x1000
@@ -67,7 +67,6 @@ class i2c_slave:
         else:
             self.i2c_base = self.I2C1_BASE
             
-        self.write_reg(self.IC_TX_TL, 4);
 
         # set SDA PIN
         mem32[self.IO_BANK0_BASE | self.mem_clr | (4 + 8 * self.sda)] = 0x1f
@@ -80,6 +79,8 @@ class i2c_slave:
         # 1 Disable DW_apb_i2c
         self.clr_reg(self.IC_ENABLE, 1)
 
+        self.write_reg(self.IC_TX_TL, 4);
+
         # set slave address
         self.clr_reg(self.IC_SAR, 0x1ff)
         self.set_reg(self.IC_SAR, self.slaveAddress & 0x1ff)
@@ -91,8 +92,9 @@ class i2c_slave:
         # bit 3 7BIT ADDR = 0
         # bit 0 SLAVE = 0
         
-        self.set_reg(self.IC_CON, 0x280)
-        self.clr_reg(self.IC_CON, 0x49)
+        #self.set_reg(self.IC_CON, 0x280)
+        self.set_reg(self.IC_CON, 0x080)
+        self.clr_reg(self.IC_CON, 0x259)
         #self.set_reg(self.IC_CON, 0x04) # speed fast
         #self.set_reg(self.IC_CON, 0x02) # speed 100kHz
         
@@ -164,7 +166,7 @@ class i2c_slave:
         done = False
         i = mem32[i2c.i2c_base | i2c.IC_RAW_INTR_STAT]
 
-        if(i & (1<<1)):		# RX_OVERRUN
+        if i & (1<<1) :		# RX_OVERRUN
             print("#OVR#", end='')
             self.CLR_RX_OVER()
 
@@ -174,16 +176,16 @@ class i2c_slave:
             self.CLR_TX_ABRT()
             if (abrt & 0xFFFF) != 0x2000 :
                 print("ABRT = " + hex(self.ABRT_SOURCE()) + " i="+hex(i))
-                done = True
-            else :
-                print("a="+hex(i))
+            done = True
+#            else :
+#                print("a="+hex(i)) #0x3d0
     
         if i & (1<<12) :  #RESTART, NEVER SEEN
 #            print("R", end='')
             self.CLR_RESTART_DET()
             done = True
             
-        if(i & (1<<10)):	#START_DET
+        if i & (1<<10) :	#START_DET
 #                print("S", end='')
             self.CLR_START_DET()
 #            done = True
@@ -198,17 +200,13 @@ class i2c_slave:
             i2c.CLR_RX_DONE()
             done = True
         
-        if done and self.transfer_in_progress :
-            self.transfer_in_progress = False;
-            if self.writecount > 0 or self.readcount > 0 :
-                print("Addr="+hex(self.addr)+" WR:"+hex(self.writecount)+" RD:"+hex(self.readcount)+":"+str(self.txc))
-            else :
-                print("exit i="+hex(i));
-            return self.writecount > 0 or self.readcount > 0
+        if done and (self.transfer_in_progress != 0):
+            self.transfer_in_progress = 0;
+            print("Addr="+hex(self.addr)+" WR:"+hex(self.writecount)+" RD:"+hex(self.readcount)+" : "+str(self.txc))
+            return True
         
             
         if (i & 0x04) : #i2c.RX_FULL():
-            self.transfer_in_progress = True
             rx = mem32[self.i2c_base | self.IC_DATA_CMD]
             firstByte = (rx & 2048) != 0
             rx = rx & 0xFF
@@ -224,6 +222,7 @@ class i2c_slave:
                 self.addrNext = False
             elif self.writecount < 128 :
                 self.slot0[self.writecount] = rx 
+                self.transfer_in_progress = 1
                 writecount += 1
             else :
                 print("overflow")
@@ -234,33 +233,21 @@ class i2c_slave:
 
         elif (i & 0x20) : #i2c.RD_REQ():
        
-            self.transfer_in_progress = True
+            self.transfer_in_progress = 2
             self.CLR_RD_REQ()
-            if self.TFNF() :
-                mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc
-                self.txc += 1
-            if self.TFNF() :
-                mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc
-                self.txc += 1
-            if self.TFNF() :
-                mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc
-                self.txc += 1
-#            mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc | 0xC0
             self.readcount += 1
-            # print("Q", end='')
-
+            while self.TFNF() and not self.TX_ABRT() :
+                mem32[self.i2c_base | self.IC_DATA_CMD] = self.txc & 0xFF
+                self.txc += 1
+                
         return False
                 
                 
 
     
-    
-    
-
-#import utime
-#from machine import mem32
-    
+   
 i2c = i2c_slave(0, sda = 0, scl = 1, slaveAddress = 0x52)
+
 def reg():
     print("     CON = " + hex(mem32[i2c.i2c_base | i2c.IC_CON] ))
     print(" RAW INT = " + hex(mem32[i2c.i2c_base | i2c.IC_RAW_INTR_STAT] ))
@@ -286,6 +273,7 @@ def master() :
     i2c.set_reg(i2c.IC_CON, 0x41)
     en()
     reg()
+    print("Master Mode")
     return 0
 
 def slave() :
@@ -315,4 +303,6 @@ def go():
     if i2c.TX_ABRT() :
         print("ABRT = " + hex(i2c.ABRT_SOURCE()))
    
+ 
+master()
  
